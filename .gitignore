@@ -1,0 +1,24 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+vendor/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# AWS
+.env
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
