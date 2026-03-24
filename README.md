@@ -1,4 +1,4 @@
-# tradeflow
+# Tradeflow
 
 A distributed FIX Protocol Engine with real-time dollar cost analysis.
 
