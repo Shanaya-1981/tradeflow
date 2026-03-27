@@ -1,15 +1,18 @@
 package fix
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 type Order struct {
-	SenderID string `json:"sender_id"`
-	TargetID string `json:"target_id"`
-	Side     string `json:"side"`
-	Quantity string `json:"quantity"`
-	Price    string `json:"price"`
-	MsgType  string `json:"msg_type"`
-	Raw      string `json:"raw"`
+	SenderID string  `json:"sender_id"`
+	TargetID string  `json:"target_id"`
+	Side     string  `json:"side"`
+	Quantity int     `json:"quantity"`
+	Price    float64 `json:"price"`
+	MsgType  string  `json:"msg_type"`
+	Raw      string  `json:"raw"`
 }
 
 func Parse(message string) Order {
@@ -37,11 +40,10 @@ func Parse(message string) Order {
 				order.Side = "SELL"
 			}
 		case "38":
-			order.Quantity = value
+			order.Quantity, _ = strconv.Atoi(value)
 		case "44":
-			order.Price = value
+			order.Price, _ = strconv.ParseFloat(value, 64)
 		}
 	}
-
 	return order
 }
