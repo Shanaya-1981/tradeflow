@@ -3,58 +3,44 @@ package main
 import (
 	"context"
 	"log"
-	"net/http"
+	"time"
 
-	"github.com/Shanaya-1981/tradeflow/order-gateway/internal/fix"
-	"github.com/Shanaya-1981/tradeflow/order-gateway/internal/queue"
-	"github.com/gin-gonic/gin"
+	"github.com/shanaya1981/tradeflow/order-router/internal/queue"
+	"github.com/shanaya1981/tradeflow/order-router/internal/router"
 )
-
-var sqsClient *queue.SQSClient
 
 func main() {
 	ctx := context.Background()
 
-	var err error
-	sqsClient, err = queue.NewSQSClient(ctx)
+	consumer, err := queue.NewConsumer(ctx)
 	if err != nil {
-		log.Fatalf("failed to connect to SQS: %v", err)
+		log.Fatalf("failed to init consumer: %v", err)
 	}
 	log.Println("connected to SQS successfully")
 
-	r := gin.Default()
-
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	r.POST("/order", handleOrder)
-
-	log.Println("order-gateway running on :8080")
-	r.Run(":8080")
-}
-
-func handleOrder(c *gin.Context) {
-	var body struct {
-		Message string `json:"message"`
+	r, err := router.New(ctx)
+	if err != nil {
+		log.Fatalf("failed to init router: %v", err)
 	}
+	log.Println("order-router polling from tradeflow-orders...")
 
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
+	for {
+		orders, handles, err := consumer.Poll(ctx)
+		if err != nil {
+			log.Printf("poll error: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for i, order := range orders {
+			if err := r.Route(ctx, order); err != nil {
+				log.Printf("route error for order from %s: %v", order.SenderID, err)
+				continue
+			}
+
+			if err := consumer.Delete(ctx, handles[i]); err != nil {
+				log.Printf("delete error: %v", err)
+			}
+		}
 	}
-
-	order := fix.Parse(body.Message)
-	log.Printf("parsed order: %+v", order)
-
-	if err := sqsClient.SendOrder(context.Background(), order); err != nil {
-		log.Printf("failed to send to SQS: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue order"})
-		return
-	}
-
-	c.JSON(http.StatusAccepted, gin.H{
-		"status": "queued",
-		"order":  order,
-	})
 }
