@@ -5,7 +5,9 @@ go 1.25.6
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.13
+	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.56.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.25
+	github.com/sony/gobreaker v1.0.0
 )
 
 require (

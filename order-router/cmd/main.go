@@ -5,8 +5,9 @@ import (
 	"log"
 	"time"
 
+	"github.com/shanaya1981/tradeflow/order-router/internal/adaptive"
+	"github.com/shanaya1981/tradeflow/order-router/internal/metrics"
 	"github.com/shanaya1981/tradeflow/order-router/internal/queue"
-	"github.com/shanaya1981/tradeflow/order-router/internal/router"
 )
 
 func main() {
@@ -18,10 +19,18 @@ func main() {
 	}
 	log.Println("connected to SQS successfully")
 
-	r, err := router.New(ctx)
+	cbRouter, err := adaptive.NewCircuitBreakerRouter(ctx)
 	if err != nil {
-		log.Fatalf("failed to init router: %v", err)
+		log.Fatalf("failed to init circuit breaker router: %v", err)
 	}
+	log.Println("circuit breaker router ready")
+
+	reporter, err := metrics.NewReporter(ctx)
+	if err != nil {
+		log.Fatalf("failed to init metrics reporter: %v", err)
+	}
+	log.Println("cloudwatch reporter ready")
+
 	log.Println("order-router polling from tradeflow-orders...")
 
 	for {
@@ -33,9 +42,17 @@ func main() {
 		}
 
 		for i, order := range orders {
-			if err := r.Route(ctx, order); err != nil {
+			err := cbRouter.Route(ctx, order)
+			if err != nil {
 				log.Printf("route error for order from %s: %v", order.SenderID, err)
+				reporter.RecordRoutingError(ctx)
 				continue
+			}
+
+			if order.Quantity > 1000 {
+				reporter.RecordRoutedToPriority(ctx)
+			} else {
+				reporter.RecordRoutedToStandard(ctx)
 			}
 
 			if err := consumer.Delete(ctx, handles[i]); err != nil {
