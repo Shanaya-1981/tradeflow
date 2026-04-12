@@ -16,6 +16,11 @@ import (
 
 const (
 	execReportURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-exec-reports"
+	costAlertURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
+
+	// cost thresholds — if exceeded, publish alert to trigger circuit breaker
+	SlippageCostThreshold = 500.0  // per minute
+	TotalCostThreshold    = 1000.0 // per minute
 )
 
 // ExecutionReport mirrors what the exchange simulator publishes
@@ -50,6 +55,17 @@ type CostResult struct {
 	TotalCost        float64 `json:"total_cost"`
 }
 
+// CostAlert is published to SQS to trigger the circuit breaker
+type CostAlert struct {
+	AlertType       string  `json:"alert_type"`
+	SlippagePerMin  float64 `json:"slippage_per_min"`
+	TotalCostPerMin float64 `json:"total_cost_per_min"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	OrdersPerMin    int     `json:"orders_per_min"`
+	Timestamp       int64   `json:"timestamp"`
+	Message         string  `json:"message"`
+}
+
 // AggregateStats tracks running totals
 type AggregateStats struct {
 	mu                sync.Mutex
@@ -65,9 +81,20 @@ type AggregateStats struct {
 	TotalLatencyMs    float64 `json:"-"`
 }
 
+// WindowStats tracks cost within the current time window
+type WindowStats struct {
+	mu             sync.Mutex
+	SlippageCost   float64
+	TotalCost      float64
+	OrderCount     int
+	TotalLatencyMs float64
+	WindowStart    time.Time
+}
+
 type Engine struct {
 	client *sqs.Client
 	stats  *AggregateStats
+	window *WindowStats
 }
 
 func New(ctx context.Context) (*Engine, error) {
@@ -80,15 +107,18 @@ func New(ctx context.Context) (*Engine, error) {
 	return &Engine{
 		client: sqs.NewFromConfig(cfg),
 		stats:  &AggregateStats{},
+		window: &WindowStats{WindowStart: time.Now()},
 	}, nil
 }
 
 // Run starts polling execution reports and printing cost analysis
 func (e *Engine) Run(ctx context.Context) {
 	log.Println("dollar cost engine started, polling execution reports queue")
+	log.Printf("cost alert thresholds: slippage=$%.0f/min, total=$%.0f/min",
+		SlippageCostThreshold, TotalCostThreshold)
 
-	// print summary every 10 seconds
 	go e.printSummary(ctx)
+	go e.monitorCostWindow(ctx)
 
 	for {
 		select {
@@ -117,6 +147,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 			result := e.calculateCost(report)
 			e.updateStats(result)
+			e.updateWindow(result)
 
 			log.Printf("COST | %s | sender=%s side=%s qty=%d | orderPx=%.2f fillPx=%.2f | slippage=$%.2f opportunity=$%.2f | TOTAL=$%.2f | latency=%.1fms",
 				result.Status, result.SenderID, result.Side, result.Quantity,
@@ -124,7 +155,6 @@ func (e *Engine) Run(ctx context.Context) {
 				result.SlippageCost, result.OpportunityCost, result.TotalCost,
 				result.TransitLatencyMs)
 
-			// delete from queue after processing
 			_, _ = e.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(execReportURL),
 				ReceiptHandle: msg.ReceiptHandle,
@@ -148,9 +178,6 @@ func (e *Engine) calculateCost(report ExecutionReport) CostResult {
 
 	switch report.Status {
 	case "FILLED":
-		// slippage cost = difference between what you wanted and what you got
-		// for BUY: positive means you paid more (bad)
-		// for SELL: positive means you received less (bad)
 		priceDiff := report.FillPrice - report.OrderPrice
 		if report.Side == "SELL" {
 			priceDiff = report.OrderPrice - report.FillPrice
@@ -160,28 +187,20 @@ func (e *Engine) calculateCost(report ExecutionReport) CostResult {
 		result.TotalCost = result.SlippageCost
 
 	case "PARTIAL":
-		// slippage on what filled
 		priceDiff := report.FillPrice - report.OrderPrice
 		if report.Side == "SELL" {
 			priceDiff = report.OrderPrice - report.FillPrice
 		}
 		result.SlippageCost = math.Abs(priceDiff) * float64(report.FilledQty)
-
-		// opportunity cost on what didn't fill
-		// estimated as the potential gain lost on unfilled shares
-		// using 0.1% of order value per unfilled share as conservative estimate
 		result.OpportunityCost = float64(result.UnfilledQty) * report.OrderPrice * 0.001
-
 		result.TotalCost = result.SlippageCost + result.OpportunityCost
 
 	case "REJECTED":
-		// full opportunity cost — the entire trade didn't happen
 		result.SlippageCost = 0
 		result.OpportunityCost = float64(report.Quantity) * report.OrderPrice * 0.001
 		result.TotalCost = result.OpportunityCost
 	}
 
-	// round to 2 decimal places
 	result.SlippageCost = math.Round(result.SlippageCost*100) / 100
 	result.OpportunityCost = math.Round(result.OpportunityCost*100) / 100
 	result.TotalCost = math.Round(result.TotalCost*100) / 100
@@ -214,6 +233,100 @@ func (e *Engine) updateStats(result CostResult) {
 	}
 }
 
+func (e *Engine) updateWindow(result CostResult) {
+	e.window.mu.Lock()
+	defer e.window.mu.Unlock()
+
+	e.window.SlippageCost += result.SlippageCost
+	e.window.TotalCost += result.TotalCost
+	e.window.OrderCount++
+	e.window.TotalLatencyMs += result.TransitLatencyMs
+}
+
+func (e *Engine) monitorCostWindow(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.window.mu.Lock()
+			elapsed := time.Since(e.window.WindowStart).Minutes()
+			if elapsed < 0.1 {
+				elapsed = 0.1
+			}
+
+			slippagePerMin := e.window.SlippageCost / elapsed
+			totalCostPerMin := e.window.TotalCost / elapsed
+			ordersPerMin := int(float64(e.window.OrderCount) / elapsed)
+			avgLatency := 0.0
+			if e.window.OrderCount > 0 {
+				avgLatency = e.window.TotalLatencyMs / float64(e.window.OrderCount)
+			}
+
+			breached := false
+			alertType := ""
+			msg := ""
+
+			if slippagePerMin > SlippageCostThreshold {
+				breached = true
+				alertType = "SLIPPAGE_THRESHOLD"
+				msg = fmt.Sprintf("slippage cost $%.2f/min exceeds threshold $%.0f/min", slippagePerMin, SlippageCostThreshold)
+			}
+			if totalCostPerMin > TotalCostThreshold {
+				breached = true
+				alertType = "TOTAL_COST_THRESHOLD"
+				msg = fmt.Sprintf("total cost $%.2f/min exceeds threshold $%.0f/min", totalCostPerMin, TotalCostThreshold)
+			}
+
+			if breached {
+				alert := CostAlert{
+					AlertType:       alertType,
+					SlippagePerMin:  math.Round(slippagePerMin*100) / 100,
+					TotalCostPerMin: math.Round(totalCostPerMin*100) / 100,
+					AvgLatencyMs:    math.Round(avgLatency*100) / 100,
+					OrdersPerMin:    ordersPerMin,
+					Timestamp:       time.Now().UnixMilli(),
+					Message:         msg,
+				}
+
+				log.Printf("COST ALERT: %s", msg)
+				go e.publishAlert(ctx, alert)
+
+				// reset window after alert
+				e.window.SlippageCost = 0
+				e.window.TotalCost = 0
+				e.window.OrderCount = 0
+				e.window.TotalLatencyMs = 0
+				e.window.WindowStart = time.Now()
+			}
+
+			e.window.mu.Unlock()
+		}
+	}
+}
+
+func (e *Engine) publishAlert(ctx context.Context, alert CostAlert) {
+	body, err := json.Marshal(alert)
+	if err != nil {
+		log.Printf("failed to marshal cost alert: %v", err)
+		return
+	}
+
+	_, err = e.client.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl:    aws.String(costAlertURL),
+		MessageBody: aws.String(string(body)),
+	})
+	if err != nil {
+		log.Printf("failed to publish cost alert: %v", err)
+		return
+	}
+
+	log.Printf("cost alert published to circuit breaker")
+}
+
 func (e *Engine) printSummary(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -240,7 +353,7 @@ func (e *Engine) printSummary(ctx context.Context) {
 	}
 }
 
-// GetStats returns current aggregate stats (for CloudWatch or API)
+// GetStats returns current aggregate stats
 func (e *Engine) GetStats() AggregateStats {
 	e.stats.mu.Lock()
 	defer e.stats.mu.Unlock()
