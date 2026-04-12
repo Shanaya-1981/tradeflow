@@ -3,21 +3,26 @@ package fix
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Order struct {
-	SenderID string  `json:"sender_id"`
-	TargetID string  `json:"target_id"`
-	Side     string  `json:"side"`
-	Quantity int     `json:"quantity"`
-	Price    float64 `json:"price"`
-	MsgType  string  `json:"msg_type"`
-	Raw      string  `json:"raw"`
+	SenderID  string  `json:"sender_id"`
+	TargetID  string  `json:"target_id"`
+	Side      string  `json:"side"`
+	Quantity  int     `json:"quantity"`
+	Price     float64 `json:"price"`
+	MsgType   string  `json:"msg_type"`
+	Raw       string  `json:"raw"`
+	Timestamp int64   `json:"timestamp"`
 }
 
 func Parse(message string) Order {
 	fields := strings.Split(message, "|")
-	order := Order{Raw: message}
+	order := Order{
+		Raw:       message,
+		Timestamp: time.Now().UnixMilli(),
+	}
 
 	for _, field := range fields {
 		parts := strings.SplitN(field, "=", 2)

@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-priority"
-	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-standard"
+	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
 	priorityThreshold = 1000
 )
 

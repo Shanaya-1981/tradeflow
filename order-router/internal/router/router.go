@@ -12,20 +12,20 @@ import (
 )
 
 const (
-	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-priority"
-	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-standard"
+	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
 	priorityThreshold = 1000
 )
 
-// Order mirrors exactly what order-gateway publishes to SQS
 type Order struct {
-	SenderID string  `json:"sender_id"`
-	TargetID string  `json:"target_id"`
-	Side     string  `json:"side"`
-	Quantity int     `json:"quantity"`
-	Price    float64 `json:"price"`
-	MsgType  string  `json:"msg_type"`
-	Raw      string  `json:"raw"`
+	SenderID  string  `json:"sender_id"`
+	TargetID  string  `json:"target_id"`
+	Side      string  `json:"side"`
+	Quantity  int     `json:"quantity"`
+	Price     float64 `json:"price"`
+	MsgType   string  `json:"msg_type"`
+	Raw       string  `json:"raw"`
+	Timestamp int64   `json:"timestamp"`
 }
 
 type Router struct {

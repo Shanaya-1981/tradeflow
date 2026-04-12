@@ -12,7 +12,7 @@ import (
 )
 
 // const queueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-orders"
-const queueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-orders"
+const queueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-orders"
 
 // type SQSClient struct {
 // 	client *sqs.Client
