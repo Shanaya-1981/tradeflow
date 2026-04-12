@@ -110,7 +110,7 @@ class ConcurrentSessionUser(HttpUser):
     def on_start(self):
         """Each user gets its own session ID and sequence counter."""
         self.seq_num = 1
-        self.session_id = ''.join(random.choices(string.ascii_uppercase, k(6)))
+        self.session_id = ''.join(random.choices(string.ascii_uppercase, k=6))
 
     @task
     def send_ordered_message(self):
