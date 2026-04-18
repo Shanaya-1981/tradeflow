@@ -12,7 +12,8 @@ import (
 	"github.com/shanaya1981/tradeflow/order-router/internal/router"
 )
 
-const inputQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-orders"
+// const inputQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-orders"
+const inputQueueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-orders"
 
 type Consumer struct {
 	client *sqs.Client
