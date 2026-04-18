@@ -3,10 +3,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o exchange-simulator ./cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o order-router ./cmd/main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /app
-COPY --from=builder /app/exchange-simulator .
-CMD ["./exchange-simulator"]
+COPY --from=builder /app/order-router .
+CMD ["./order-router"]

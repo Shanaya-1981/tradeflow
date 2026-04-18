@@ -15,28 +15,31 @@ import (
 )
 
 const (
-	execReportURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-exec-reports"
-	costAlertURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
+	priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	standardQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
+	costAlertURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
 
-	// cost thresholds — if exceeded, publish alert to trigger circuit breaker
+	// price drift model: how much the market moves per ms of delay
+	// at 100ms delay on a $200 stock: $200 * 0.00001 * 100 = $0.20 slippage per share
+	priceDriftPerMs = 0.00001
+
+	// cost alert thresholds
 	SlippageCostThreshold = 500.0  // per minute
 	TotalCostThreshold    = 1000.0 // per minute
+
+	workerCount = 10 // concurrent workers per queue
 )
 
-// ExecutionReport mirrors what the exchange simulator publishes
-type ExecutionReport struct {
-	SenderID         string  `json:"sender_id"`
-	TargetID         string  `json:"target_id"`
-	Side             string  `json:"side"`
-	Quantity         int     `json:"quantity"`
-	OrderPrice       float64 `json:"order_price"`
-	FillPrice        float64 `json:"fill_price"`
-	FilledQty        int     `json:"filled_qty"`
-	Status           string  `json:"status"`
-	MsgType          string  `json:"msg_type"`
-	OrderTimestamp   int64   `json:"order_timestamp"`
-	FillTimestamp    int64   `json:"fill_timestamp"`
-	TransitLatencyMs float64 `json:"transit_latency_ms"`
+// Order mirrors the struct from gateway and router
+type Order struct {
+	SenderID  string  `json:"sender_id"`
+	TargetID  string  `json:"target_id"`
+	Side      string  `json:"side"`
+	Quantity  int     `json:"quantity"`
+	Price     float64 `json:"price"`
+	MsgType   string  `json:"msg_type"`
+	Raw       string  `json:"raw"`
+	Timestamp int64   `json:"timestamp"`
 }
 
 // CostResult is the dollar cost analysis for a single order
@@ -44,15 +47,11 @@ type CostResult struct {
 	SenderID         string  `json:"sender_id"`
 	Side             string  `json:"side"`
 	Quantity         int     `json:"quantity"`
-	OrderPrice       float64 `json:"order_price"`
-	FillPrice        float64 `json:"fill_price"`
-	FilledQty        int     `json:"filled_qty"`
-	UnfilledQty      int     `json:"unfilled_qty"`
-	Status           string  `json:"status"`
-	TransitLatencyMs float64 `json:"transit_latency_ms"`
+	Price            float64 `json:"price"`
+	EstSlippage      float64 `json:"est_slippage_per_share"`
 	SlippageCost     float64 `json:"slippage_cost"`
-	OpportunityCost  float64 `json:"opportunity_cost"`
-	TotalCost        float64 `json:"total_cost"`
+	TransitLatencyMs float64 `json:"transit_latency_ms"`
+	QueueType        string  `json:"queue_type"`
 }
 
 // CostAlert is published to SQS to trigger the circuit breaker
@@ -68,24 +67,20 @@ type CostAlert struct {
 
 // AggregateStats tracks running totals
 type AggregateStats struct {
-	mu                sync.Mutex
-	TotalOrders       int     `json:"total_orders"`
-	FilledOrders      int     `json:"filled_orders"`
-	PartialOrders     int     `json:"partial_orders"`
-	RejectedOrders    int     `json:"rejected_orders"`
-	TotalSlippageCost float64 `json:"total_slippage_cost"`
-	TotalOpportCost   float64 `json:"total_opportunity_cost"`
-	TotalDollarCost   float64 `json:"total_dollar_cost"`
-	AvgLatencyMs      float64 `json:"avg_latency_ms"`
-	MaxLatencyMs      float64 `json:"max_latency_ms"`
-	TotalLatencyMs    float64 `json:"-"`
+	mu             sync.Mutex
+	TotalOrders    int     `json:"total_orders"`
+	PriorityOrders int     `json:"priority_orders"`
+	StandardOrders int     `json:"standard_orders"`
+	TotalSlippage  float64 `json:"total_slippage_cost"`
+	AvgLatencyMs   float64 `json:"avg_latency_ms"`
+	MaxLatencyMs   float64 `json:"max_latency_ms"`
+	TotalLatencyMs float64 `json:"-"`
 }
 
-// WindowStats tracks cost within the current time window
+// WindowStats tracks cost within the current time window for alerts
 type WindowStats struct {
 	mu             sync.Mutex
 	SlippageCost   float64
-	TotalCost      float64
 	OrderCount     int
 	TotalLatencyMs float64
 	WindowStart    time.Time
@@ -111,15 +106,38 @@ func New(ctx context.Context) (*Engine, error) {
 	}, nil
 }
 
-// Run starts polling execution reports and printing cost analysis
+// Run starts polling both priority and standard queues
 func (e *Engine) Run(ctx context.Context) {
-	log.Println("dollar cost engine started, polling execution reports queue")
-	log.Printf("cost alert thresholds: slippage=$%.0f/min, total=$%.0f/min",
+	log.Println("dollar cost engine started, polling priority and standard queues")
+	log.Printf("cost model: $%.5f drift per ms per share", priceDriftPerMs)
+	log.Printf("alert thresholds: slippage=$%.0f/min, total=$%.0f/min",
 		SlippageCostThreshold, TotalCostThreshold)
 
 	go e.printSummary(ctx)
 	go e.monitorCostWindow(ctx)
 
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			e.pollQueue(ctx, priorityQueueURL, "priority", id)
+		}(i)
+	}
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			e.pollQueue(ctx, standardQueueURL, "standard", id)
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func (e *Engine) pollQueue(ctx context.Context, queueURL string, queueType string, workerID int) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,84 +146,59 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 
 		output, err := e.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(execReportURL),
+			QueueUrl:            aws.String(queueURL),
 			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     5,
+			WaitTimeSeconds:     1,
 		})
 		if err != nil {
-			log.Printf("receive error: %v", err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
 		for _, msg := range output.Messages {
-			var report ExecutionReport
-			if err := json.Unmarshal([]byte(*msg.Body), &report); err != nil {
-				log.Printf("unmarshal error: %v", err)
+			var order Order
+			if err := json.Unmarshal([]byte(*msg.Body), &order); err != nil {
 				continue
 			}
 
-			result := e.calculateCost(report)
+			result := e.calculateCost(order, queueType)
 			e.updateStats(result)
 			e.updateWindow(result)
 
-			log.Printf("COST | %s | sender=%s side=%s qty=%d | orderPx=%.2f fillPx=%.2f | slippage=$%.2f opportunity=$%.2f | TOTAL=$%.2f | latency=%.1fms",
-				result.Status, result.SenderID, result.Side, result.Quantity,
-				result.OrderPrice, result.FillPrice,
-				result.SlippageCost, result.OpportunityCost, result.TotalCost,
-				result.TransitLatencyMs)
+			log.Printf("COST | %s | sender=%s side=%s qty=%d price=%.2f | slippage=$%.2f (est $%.4f/share) | latency=%.0fms",
+				result.QueueType, result.SenderID, result.Side, result.Quantity,
+				result.Price, result.SlippageCost, result.EstSlippage, result.TransitLatencyMs)
 
 			_, _ = e.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-				QueueUrl:      aws.String(execReportURL),
+				QueueUrl:      aws.String(queueURL),
 				ReceiptHandle: msg.ReceiptHandle,
 			})
 		}
 	}
 }
 
-func (e *Engine) calculateCost(report ExecutionReport) CostResult {
-	result := CostResult{
-		SenderID:         report.SenderID,
-		Side:             report.Side,
-		Quantity:         report.Quantity,
-		OrderPrice:       report.OrderPrice,
-		FillPrice:        report.FillPrice,
-		FilledQty:        report.FilledQty,
-		UnfilledQty:      report.Quantity - report.FilledQty,
-		Status:           report.Status,
-		TransitLatencyMs: report.TransitLatencyMs,
+func (e *Engine) calculateCost(order Order, queueType string) CostResult {
+	now := time.Now().UnixMilli()
+	transitLatency := float64(now - order.Timestamp)
+	if transitLatency < 0 {
+		transitLatency = 1
 	}
 
-	switch report.Status {
-	case "FILLED":
-		priceDiff := report.FillPrice - report.OrderPrice
-		if report.Side == "SELL" {
-			priceDiff = report.OrderPrice - report.FillPrice
-		}
-		result.SlippageCost = math.Abs(priceDiff) * float64(report.FilledQty)
-		result.OpportunityCost = 0
-		result.TotalCost = result.SlippageCost
+	// estimated slippage per share based on latency and price
+	estSlippage := order.Price * priceDriftPerMs * transitLatency
+	slippageCost := math.Round(estSlippage*float64(order.Quantity)*100) / 100
+	estSlippage = math.Round(estSlippage*10000) / 10000
 
-	case "PARTIAL":
-		priceDiff := report.FillPrice - report.OrderPrice
-		if report.Side == "SELL" {
-			priceDiff = report.OrderPrice - report.FillPrice
-		}
-		result.SlippageCost = math.Abs(priceDiff) * float64(report.FilledQty)
-		result.OpportunityCost = float64(result.UnfilledQty) * report.OrderPrice * 0.001
-		result.TotalCost = result.SlippageCost + result.OpportunityCost
-
-	case "REJECTED":
-		result.SlippageCost = 0
-		result.OpportunityCost = float64(report.Quantity) * report.OrderPrice * 0.001
-		result.TotalCost = result.OpportunityCost
+	return CostResult{
+		SenderID:         order.SenderID,
+		Side:             order.Side,
+		Quantity:         order.Quantity,
+		Price:            order.Price,
+		EstSlippage:      estSlippage,
+		SlippageCost:     slippageCost,
+		TransitLatencyMs: transitLatency,
+		QueueType:        queueType,
 	}
-
-	result.SlippageCost = math.Round(result.SlippageCost*100) / 100
-	result.OpportunityCost = math.Round(result.OpportunityCost*100) / 100
-	result.TotalCost = math.Round(result.TotalCost*100) / 100
-
-	return result
 }
 
 func (e *Engine) updateStats(result CostResult) {
@@ -213,9 +206,7 @@ func (e *Engine) updateStats(result CostResult) {
 	defer e.stats.mu.Unlock()
 
 	e.stats.TotalOrders++
-	e.stats.TotalSlippageCost += result.SlippageCost
-	e.stats.TotalOpportCost += result.OpportunityCost
-	e.stats.TotalDollarCost += result.TotalCost
+	e.stats.TotalSlippage += result.SlippageCost
 	e.stats.TotalLatencyMs += result.TransitLatencyMs
 
 	if result.TransitLatencyMs > e.stats.MaxLatencyMs {
@@ -223,13 +214,10 @@ func (e *Engine) updateStats(result CostResult) {
 	}
 	e.stats.AvgLatencyMs = e.stats.TotalLatencyMs / float64(e.stats.TotalOrders)
 
-	switch result.Status {
-	case "FILLED":
-		e.stats.FilledOrders++
-	case "PARTIAL":
-		e.stats.PartialOrders++
-	case "REJECTED":
-		e.stats.RejectedOrders++
+	if result.QueueType == "priority" {
+		e.stats.PriorityOrders++
+	} else {
+		e.stats.StandardOrders++
 	}
 }
 
@@ -238,7 +226,6 @@ func (e *Engine) updateWindow(result CostResult) {
 	defer e.window.mu.Unlock()
 
 	e.window.SlippageCost += result.SlippageCost
-	e.window.TotalCost += result.TotalCost
 	e.window.OrderCount++
 	e.window.TotalLatencyMs += result.TransitLatencyMs
 }
@@ -259,7 +246,6 @@ func (e *Engine) monitorCostWindow(ctx context.Context) {
 			}
 
 			slippagePerMin := e.window.SlippageCost / elapsed
-			totalCostPerMin := e.window.TotalCost / elapsed
 			ordersPerMin := int(float64(e.window.OrderCount) / elapsed)
 			avgLatency := 0.0
 			if e.window.OrderCount > 0 {
@@ -273,19 +259,15 @@ func (e *Engine) monitorCostWindow(ctx context.Context) {
 			if slippagePerMin > SlippageCostThreshold {
 				breached = true
 				alertType = "SLIPPAGE_THRESHOLD"
-				msg = fmt.Sprintf("slippage cost $%.2f/min exceeds threshold $%.0f/min", slippagePerMin, SlippageCostThreshold)
-			}
-			if totalCostPerMin > TotalCostThreshold {
-				breached = true
-				alertType = "TOTAL_COST_THRESHOLD"
-				msg = fmt.Sprintf("total cost $%.2f/min exceeds threshold $%.0f/min", totalCostPerMin, TotalCostThreshold)
+				msg = fmt.Sprintf("slippage cost $%.2f/min exceeds threshold $%.0f/min (%d orders/min, avg latency %.0fms)",
+					slippagePerMin, SlippageCostThreshold, ordersPerMin, avgLatency)
 			}
 
 			if breached {
 				alert := CostAlert{
 					AlertType:       alertType,
 					SlippagePerMin:  math.Round(slippagePerMin*100) / 100,
-					TotalCostPerMin: math.Round(totalCostPerMin*100) / 100,
+					TotalCostPerMin: math.Round(slippagePerMin*100) / 100,
 					AvgLatencyMs:    math.Round(avgLatency*100) / 100,
 					OrdersPerMin:    ordersPerMin,
 					Timestamp:       time.Now().UnixMilli(),
@@ -295,9 +277,8 @@ func (e *Engine) monitorCostWindow(ctx context.Context) {
 				log.Printf("COST ALERT: %s", msg)
 				go e.publishAlert(ctx, alert)
 
-				// reset window after alert
+				// reset window
 				e.window.SlippageCost = 0
-				e.window.TotalCost = 0
 				e.window.OrderCount = 0
 				e.window.TotalLatencyMs = 0
 				e.window.WindowStart = time.Now()
@@ -339,13 +320,12 @@ func (e *Engine) printSummary(ctx context.Context) {
 			e.stats.mu.Lock()
 			if e.stats.TotalOrders > 0 {
 				log.Printf("=== DOLLAR COST SUMMARY ===")
-				log.Printf("  Orders: %d total | %d filled | %d partial | %d rejected",
-					e.stats.TotalOrders, e.stats.FilledOrders, e.stats.PartialOrders, e.stats.RejectedOrders)
-				log.Printf("  Slippage Cost:     $%.2f", e.stats.TotalSlippageCost)
-				log.Printf("  Opportunity Cost:  $%.2f", e.stats.TotalOpportCost)
-				log.Printf("  TOTAL DOLLAR COST: $%.2f", e.stats.TotalDollarCost)
+				log.Printf("  Orders: %d total | %d priority | %d standard",
+					e.stats.TotalOrders, e.stats.PriorityOrders, e.stats.StandardOrders)
+				log.Printf("  Total Slippage Cost: $%.2f", e.stats.TotalSlippage)
 				log.Printf("  Avg Latency: %.1fms | Max Latency: %.1fms",
 					e.stats.AvgLatencyMs, e.stats.MaxLatencyMs)
+				log.Printf("  Cost per Order: $%.2f", e.stats.TotalSlippage/float64(e.stats.TotalOrders))
 				log.Printf("===========================")
 			}
 			e.stats.mu.Unlock()
@@ -353,7 +333,6 @@ func (e *Engine) printSummary(ctx context.Context) {
 	}
 }
 
-// GetStats returns current aggregate stats
 func (e *Engine) GetStats() AggregateStats {
 	e.stats.mu.Lock()
 	defer e.stats.mu.Unlock()

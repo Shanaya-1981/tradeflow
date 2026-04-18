@@ -32,7 +32,7 @@ func (c *Consumer) Poll(ctx context.Context) ([]router.Order, []string, error) {
 	out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(inputQueueURL),
 		MaxNumberOfMessages: int32(10),
-		WaitTimeSeconds:     int32(5),
+		WaitTimeSeconds:     int32(1),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to poll SQS: %w", err)

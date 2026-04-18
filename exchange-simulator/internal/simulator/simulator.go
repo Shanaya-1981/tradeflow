@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,12 +19,13 @@ const (
 	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
 	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
 	execReportURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-exec-reports"
-	priceDriftPerMs   = 0.0005 // price moves $0.0005 per ms of delay
-	rejectProbability = 0.05   // 5% of orders get rejected
-	partialFillProb   = 0.15   // 15% get partial fills
+	priceDriftPerMs   = 0.00002 // realistic: $0.00002 per ms of delay
+	maxSlippagePct    = 0.02    // cap slippage at 2% of order price
+	rejectProbability = 0.05    // 5% of orders get rejected
+	partialFillProb   = 0.15    // 15% get partial fills
+	workerCount       = 10      // concurrent workers per queue
 )
 
-// Order mirrors the struct from gateway and router
 type Order struct {
 	SenderID  string  `json:"sender_id"`
 	TargetID  string  `json:"target_id"`
@@ -35,7 +37,6 @@ type Order struct {
 	Timestamp int64   `json:"timestamp"`
 }
 
-// ExecutionReport is the FIX 35=8 response from the exchange
 type ExecutionReport struct {
 	SenderID         string  `json:"sender_id"`
 	TargetID         string  `json:"target_id"`
@@ -65,12 +66,30 @@ func New(ctx context.Context) (*Simulator, error) {
 	return &Simulator{client: sqs.NewFromConfig(cfg)}, nil
 }
 
-// Run starts polling both priority and standard queues
 func (s *Simulator) Run(ctx context.Context) {
-	log.Println("exchange simulator started, polling priority and standard queues")
+	log.Printf("exchange simulator started with %d workers per queue", workerCount)
 
-	go s.pollQueue(ctx, priorityQueueURL, "priority")
-	s.pollQueue(ctx, standardQueueURL, "standard")
+	var wg sync.WaitGroup
+
+	// launch workers for priority queue
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			s.pollQueue(ctx, priorityQueueURL, fmt.Sprintf("priority-%d", id))
+		}(i)
+	}
+
+	// launch workers for standard queue
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			s.pollQueue(ctx, standardQueueURL, fmt.Sprintf("standard-%d", id))
+		}(i)
+	}
+
+	wg.Wait()
 }
 
 func (s *Simulator) pollQueue(ctx context.Context, queueURL string, label string) {
@@ -84,11 +103,11 @@ func (s *Simulator) pollQueue(ctx context.Context, queueURL string, label string
 		output, err := s.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(queueURL),
 			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     5,
+			WaitTimeSeconds:     1,
 		})
 		if err != nil {
 			log.Printf("[%s] receive error: %v", label, err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
@@ -109,7 +128,6 @@ func (s *Simulator) pollQueue(ctx context.Context, queueURL string, label string
 				continue
 			}
 
-			// delete from source queue after processing
 			_, _ = s.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(queueURL),
 				ReceiptHandle: msg.ReceiptHandle,
@@ -122,7 +140,7 @@ func (s *Simulator) simulateFill(order Order) ExecutionReport {
 	now := time.Now().UnixMilli()
 	transitLatency := float64(now - order.Timestamp)
 	if transitLatency < 0 {
-		transitLatency = 1 // minimum 1ms
+		transitLatency = 1
 	}
 
 	report := ExecutionReport{
@@ -131,7 +149,7 @@ func (s *Simulator) simulateFill(order Order) ExecutionReport {
 		Side:             order.Side,
 		Quantity:         order.Quantity,
 		OrderPrice:       order.Price,
-		MsgType:          "8", // FIX execution report
+		MsgType:          "8",
 		OrderTimestamp:   order.Timestamp,
 		FillTimestamp:    now,
 		TransitLatencyMs: transitLatency,
@@ -140,26 +158,32 @@ func (s *Simulator) simulateFill(order Order) ExecutionReport {
 	roll := rand.Float64()
 
 	if roll < rejectProbability {
-		// rejected — no fill
 		report.Status = "REJECTED"
 		report.FillPrice = 0
 		report.FilledQty = 0
 		return report
 	}
 
-	// calculate slippage based on transit latency
-	// longer delay = more price drift = worse fill
+	// calculate slippage based on transit latency, capped at maxSlippagePct
 	direction := 1.0
 	if order.Side == "SELL" {
-		direction = -1.0 // sells get worse price when market drops
+		direction = -1.0
 	}
 	slippage := transitLatency * priceDriftPerMs * direction
+	// cap slippage at max percentage of order price
+	maxSlippage := order.Price * maxSlippagePct
+	if math.Abs(slippage) > maxSlippage {
+		if slippage > 0 {
+			slippage = maxSlippage
+		} else {
+			slippage = -maxSlippage
+		}
+	}
 	// add small random noise
 	noise := (rand.Float64() - 0.5) * 0.02
 	report.FillPrice = math.Round((order.Price+slippage+noise)*100) / 100
 
 	if roll < rejectProbability+partialFillProb {
-		// partial fill — between 20% and 80% of quantity
 		fillPct := 0.2 + rand.Float64()*0.6
 		report.FilledQty = int(float64(order.Quantity) * fillPct)
 		if report.FilledQty < 1 {
@@ -167,7 +191,6 @@ func (s *Simulator) simulateFill(order Order) ExecutionReport {
 		}
 		report.Status = "PARTIAL"
 	} else {
-		// full fill
 		report.FilledQty = order.Quantity
 		report.Status = "FILLED"
 	}
