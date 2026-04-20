@@ -11,13 +11,18 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
 
 const (
-	priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
-	standardQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
-	costAlertURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
+	//priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	//standardQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
+	//costAlertURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
+	priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-priority"
+	standardQueueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-standard"
+	costAlertURL     = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-cost-alerts"
 
 	// price drift model: how much the market moves per ms of delay
 	// at 100ms delay on a $200 stock: $200 * 0.00001 * 100 = $0.20 slippage per share
@@ -86,10 +91,12 @@ type WindowStats struct {
 	WindowStart    time.Time
 }
 
+// Engine — single definition, includes cwClient for CloudWatch emission
 type Engine struct {
-	client *sqs.Client
-	stats  *AggregateStats
-	window *WindowStats
+	client   *sqs.Client
+	cwClient *cloudwatch.Client // emits metrics to Tradeflow/CostEngine namespace
+	stats    *AggregateStats
+	window   *WindowStats
 }
 
 func New(ctx context.Context) (*Engine, error) {
@@ -100,13 +107,13 @@ func New(ctx context.Context) (*Engine, error) {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 	return &Engine{
-		client: sqs.NewFromConfig(cfg),
-		stats:  &AggregateStats{},
-		window: &WindowStats{WindowStart: time.Now()},
+		client:   sqs.NewFromConfig(cfg),
+		cwClient: cloudwatch.NewFromConfig(cfg),
+		stats:    &AggregateStats{},
+		window:   &WindowStats{WindowStart: time.Now()},
 	}, nil
 }
 
-// Run starts polling both priority and standard queues
 func (e *Engine) Run(ctx context.Context) {
 	log.Println("dollar cost engine started, polling priority and standard queues")
 	log.Printf("cost model: $%.5f drift per ms per share", priceDriftPerMs)
@@ -184,7 +191,6 @@ func (e *Engine) calculateCost(order Order, queueType string) CostResult {
 		transitLatency = 1
 	}
 
-	// estimated slippage per share based on latency and price
 	estSlippage := order.Price * priceDriftPerMs * transitLatency
 	slippageCost := math.Round(estSlippage*float64(order.Quantity)*100) / 100
 	estSlippage = math.Round(estSlippage*10000) / 10000
@@ -252,32 +258,24 @@ func (e *Engine) monitorCostWindow(ctx context.Context) {
 				avgLatency = e.window.TotalLatencyMs / float64(e.window.OrderCount)
 			}
 
-			breached := false
-			alertType := ""
-			msg := ""
+			// always emit to CloudWatch every 15 seconds regardless of threshold
+			// this ensures the dashboard always has data, not just during high load
+			go e.emitCostMetric(ctx, slippagePerMin, avgLatency)
 
 			if slippagePerMin > SlippageCostThreshold {
-				breached = true
-				alertType = "SLIPPAGE_THRESHOLD"
-				msg = fmt.Sprintf("slippage cost $%.2f/min exceeds threshold $%.0f/min (%d orders/min, avg latency %.0fms)",
-					slippagePerMin, SlippageCostThreshold, ordersPerMin, avgLatency)
-			}
-
-			if breached {
 				alert := CostAlert{
-					AlertType:       alertType,
+					AlertType:       "SLIPPAGE_THRESHOLD",
 					SlippagePerMin:  math.Round(slippagePerMin*100) / 100,
 					TotalCostPerMin: math.Round(slippagePerMin*100) / 100,
 					AvgLatencyMs:    math.Round(avgLatency*100) / 100,
 					OrdersPerMin:    ordersPerMin,
 					Timestamp:       time.Now().UnixMilli(),
-					Message:         msg,
+					Message: fmt.Sprintf("slippage cost $%.2f/min exceeds threshold $%.0f/min (%d orders/min, avg latency %.0fms)",
+						slippagePerMin, SlippageCostThreshold, ordersPerMin, avgLatency),
 				}
-
-				log.Printf("COST ALERT: %s", msg)
+				log.Printf("COST ALERT: %s", alert.Message)
 				go e.publishAlert(ctx, alert)
 
-				// reset window
 				e.window.SlippageCost = 0
 				e.window.OrderCount = 0
 				e.window.TotalLatencyMs = 0
@@ -286,6 +284,27 @@ func (e *Engine) monitorCostWindow(ctx context.Context) {
 
 			e.window.mu.Unlock()
 		}
+	}
+}
+
+func (e *Engine) emitCostMetric(ctx context.Context, dollarLossPerMin float64, avgLatency float64) {
+	_, err := e.cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
+		Namespace: aws.String("Tradeflow/CostEngine"),
+		MetricData: []types.MetricDatum{
+			{
+				MetricName: aws.String("DollarLossPerMinute"),
+				Value:      aws.Float64(dollarLossPerMin),
+				Unit:       types.StandardUnitNone,
+			},
+			{
+				MetricName: aws.String("AvgLatencyMs"),
+				Value:      aws.Float64(avgLatency),
+				Unit:       types.StandardUnitMilliseconds,
+			},
+		},
+	})
+	if err != nil {
+		log.Printf("failed to emit cost metric: %v", err)
 	}
 }
 
@@ -304,7 +323,6 @@ func (e *Engine) publishAlert(ctx context.Context, alert CostAlert) {
 		log.Printf("failed to publish cost alert: %v", err)
 		return
 	}
-
 	log.Printf("cost alert published to circuit breaker")
 }
 

@@ -2,7 +2,7 @@ from locust import HttpUser, task, between, constant_throughput
 import random
 import string
 
-GATEWAY_URL = "http://localhost:8080"
+GATEWAY_URL = "http://tradeflow-alb-652183232.us-west-2.elb.amazonaws.com"
 
 def generate_fix_message():
     """Generate a realistic FIX new order message with random quantity and price."""

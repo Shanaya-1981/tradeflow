@@ -16,9 +16,12 @@ import (
 )
 
 const (
-	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
-	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
-	execReportURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-exec-reports"
+	//priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	//standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
+	//execReportURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-exec-reports"
+	priorityQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-priority"
+	standardQueueURL  = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-standard"
+	execReportURL     = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-exec-reports"
 	priceDriftPerMs   = 0.00002 // realistic: $0.00002 per ms of delay
 	maxSlippagePct    = 0.02    // cap slippage at 2% of order price
 	rejectProbability = 0.05    // 5% of orders get rejected
