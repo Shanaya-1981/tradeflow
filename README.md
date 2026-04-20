@@ -222,7 +222,7 @@ The architecture is designed so that the exchange simulator can be replaced with
 
 ## Team
 
-**Supriya Ashok Kumar** (California): Order Gateway, FIX Parser, Exchange Simulator, Dollar Cost Engine, Terraform Infrastructure
+**Supriya Tiwari** (California): Order Gateway, FIX Parser, Exchange Simulator, Dollar Cost Engine, Terraform Infrastructure
 
 **Navaneeth Maruthi** (Boston): Order Router, Circuit Breaker, CloudWatch Metrics Reporter, Locust Load Tests
 
