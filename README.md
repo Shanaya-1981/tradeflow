@@ -4,14 +4,14 @@ Distributed FIX Protocol Engine with Real-Time Dollar Cost Analysis
 
 ## What is this
 
-Tradeflow is a distributed system that routes trade orders at scale and calculates the exact financial cost of every delay in real time. When latency causes slippage, the system detects it, measures it in dollars, and automatically trips a circuit breaker to stop further losses.
+Tradeflow is a distributed system that routes trade orders at scale and calculates the estimated financial cost of every delay in real time. When latency causes slippage, the system detects it, measures it in dollars, and automatically trips a circuit breaker to stop further losses.
 
 
 ## Why we built it
 
 In financial infrastructure, a 200ms delay on a 5,000 share order at $150.50 can cost over $1,000 in slippage. Multiply that across thousands of orders and the numbers add up fast. Existing tools tell you that latency went up. They do not tell you what that latency cost the firm.
 
-Tradeflow was built to close that gap. It takes the standard metrics (latency, throughput, error rate) and converts them into a single signal that actually drives decisions: dollar cost per minute.
+Tradeflow was built to close that gap. Instead of just showing latency numbers, Tradeflow calculates what that latency actually cost in dollars.
 
 This project was built as part of CS 6650 Scalable Distributed Systems at Northeastern University, Spring 2026.
 
@@ -49,7 +49,7 @@ FIX Client --> Order Gateway --> [tradeflow-orders] --> Order Router
 
 ## The Feedback Loop
 
-This is the core of tradeflow. The dollar cost engine monitors slippage in real time. When cost exceeds $500 per minute, it publishes a cost alert. The circuit breaker in the router receives that alert and starts rejecting large orders for 30 seconds to prevent further damage.
+This is the core of Tradeflow. The dollar cost engine monitors slippage in real time. When cost exceeds $500 per minute, it publishes a cost alert. The circuit breaker in the router receives that alert and starts rejecting large orders for 30 seconds to limit losses.
 
 
 ## Tech Stack
