@@ -16,12 +16,9 @@ import (
 )
 
 const (
-	//priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
-	//standardQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
-	//costAlertURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
-	priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-priority"
-	standardQueueURL = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-standard"
-	costAlertURL     = "https://sqs.us-west-2.amazonaws.com/650685162309/tradeflow-cost-alerts"
+	priorityQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-priority"
+	standardQueueURL = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-standard"
+	costAlertURL     = "https://sqs.us-west-2.amazonaws.com/685016798289/tradeflow-cost-alerts"
 
 	priorityThreshold       = 1000
 	preMarketPriorityThresh = 500 // lower threshold during pre-market = more orders get priority
