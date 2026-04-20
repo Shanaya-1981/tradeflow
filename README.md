@@ -6,13 +6,12 @@ Distributed FIX Protocol Engine with Real-Time Dollar Cost Analysis
 
 Tradeflow is a distributed system that routes trade orders at scale and calculates the exact financial cost of every delay in real time. When latency causes slippage, the system detects it, measures it in dollars, and automatically trips a circuit breaker to stop further losses.
 
-Most distributed systems measure latency in milliseconds. This one measures it in dollars.
 
 ## Why we built it
 
 In financial infrastructure, a 200ms delay on a 5,000 share order at $150.50 can cost over $1,000 in slippage. Multiply that across thousands of orders and the numbers add up fast. Existing tools tell you that latency went up. They do not tell you what that latency cost the firm.
 
-tradeflow was built to close that gap. It takes the standard metrics (latency, throughput, error rate) and converts them into a single signal that actually drives decisions: dollar cost per minute.
+Tradeflow was built to close that gap. It takes the standard metrics (latency, throughput, error rate) and converts them into a single signal that actually drives decisions: dollar cost per minute.
 
 This project was built as part of CS 6650 Scalable Distributed Systems at Northeastern University, Spring 2026.
 
@@ -52,7 +51,6 @@ FIX Client --> Order Gateway --> [tradeflow-orders] --> Order Router
 
 This is the core of tradeflow. The dollar cost engine monitors slippage in real time. When cost exceeds $500 per minute, it publishes a cost alert. The circuit breaker in the router receives that alert and starts rejecting large orders for 30 seconds to prevent further damage.
 
-Most circuit breakers trip on error counts or latency thresholds. This one trips on financial impact. The system does not care that p99 is 200ms. It cares that money is leaving the building.
 
 ## Tech Stack
 
@@ -181,7 +179,7 @@ Repeat for the other three services.
 
 ## FIX Protocol Reference
 
-FIX (Financial Information eXchange) is the standard messaging protocol used across the financial industry. tradeflow supports the following FIX tags:
+FIX (Financial Information eXchange) is the standard messaging protocol used across the financial industry. Tradeflow supports the following FIX tags:
 
 | Tag | Field | Example |
 |-----|-------|---------|
@@ -216,15 +214,20 @@ Key thresholds that can be adjusted in the source code:
 | Circuit breaker recovery | 30 seconds | order-router/internal/adaptive/circuit_breaker.go |
 | Price drift per ms | $0.0005 | exchange-simulator/internal/simulator/simulator.go |
 
-## Extending tradeflow
-
-The architecture is designed so that the exchange simulator can be replaced with any backend that produces execution reports in the same JSON format. If you want to connect to a real paper trading API (like Alpaca), replace the simulator service while keeping the cost engine, circuit breaker, and router unchanged.
 
 ## Team
 
 **Supriya Tiwari** (California): Order Gateway, FIX Parser, Exchange Simulator, Dollar Cost Engine, Terraform Infrastructure
 
 **Navaneeth Maruthi** (Boston): Order Router, Circuit Breaker, CloudWatch Metrics Reporter, Locust Load Tests
+
+## Known Issues and TODO
+
+- SQS queue URLs are hardcoded per AWS account. You will need to update them in each service before deploying.
+- Sequence number validation is not implemented at the gateway level. The gateway forwards all messages regardless of ordering.
+- FIFO queues have not been tested. The current setup uses SQS standard queues which do not guarantee message ordering.
+- Predictive scaling only adjusts the routing threshold. It does not yet trigger ECS auto-scaling to add capacity before market open.
+- The exchange simulator uses a fixed price drift model. Real market conditions would have variable volatility.
 
 ## License
 
